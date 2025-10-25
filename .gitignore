@@ -1,0 +1,17 @@
+﻿__pycache__/
+.vs/
+/x64/Debug
+/x64/Release
+/build
+/dist
+embeddings.egg-info/
+/test.db
+/examples/dotnet/bin/Debug
+/examples/dotnet/obj/Debug
+/embeddings/embeddings.exp
+/embeddings/embeddings.lib
+/embeddings/embeddings.pdb
+/embeddings/embeddings.pyd
+/examples/dotnet
+/src/embeddings.cs
+/src/embeddings.vcxproj.user

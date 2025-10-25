@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "embeddings"
+version = "1.0"
+description = "Single file (embeddings.c) vector database for Windows (x64)"
+readme = "README.md"
+authors = [{ name = "Azret Botash", email = "azret.botash@gmail.com" }]
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C",
+    "Operating System :: Microsoft :: Windows",
+    "Environment :: Win64 (AMD64)",
+]
+
+[tool.setuptools]
+packages = ["embeddings"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"embeddings" = ["*.pyd", "*.dll"]
