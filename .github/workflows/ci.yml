@@ -46,16 +46,15 @@ jobs:
       run: |
         $py = python -c "import sys; print(sys.base_prefix)"
         echo "PYTHONROOT=$py" >> $env:GITHUB_ENV
-        echo "PythonIncludeDir=$py\include" >> $env:GITHUB_ENV
-        echo "PythonLibDir=$py\libs" >> $env:GITHUB_ENV
-        echo "PYTHONROOT=$py"
-        echo "PythonIncludeDir=$py\include"
-        echo "PythonLibDir=$py\libs"
-        dir  $py\include
+
     - name: msbuild src/embeddings.vcxproj /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
       shell: cmd
       run: |
-        msbuild src/embeddings.vcxproj /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
+        msbuild embeddings.vcxproj `
+          /p:Configuration=${{ matrix.configuration }} `
+          /p:Platform=x64 `
+          /p:PythonIncludeDir="$env:PYTHONROOT\include" `
+          /p:PythonLibDir="$env:PYTHONROOT\libs"
 
     - name: dir /s /b *.dll *.pyd *.exe
       run: |
