@@ -1,5 +1,8 @@
 # embeddings.c
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Build](https://github.com/azret/embeddings/actions/workflows/ci.yml/badge.svg)](https://github.com/azret/embeddings/actions)
+
 Single file vector store (Windows Only).
 
 ### Examples
