@@ -51,7 +51,7 @@ jobs:
         echo "PYTHONROOT=$py"
         echo "PythonIncludeDir=$py\include"
         echo "PythonLibDir=$py\libs"
-
+        dir  $py\include
     - name: msbuild src/embeddings.vcxproj /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
       shell: cmd
       run: |
