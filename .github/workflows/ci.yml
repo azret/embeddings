@@ -41,6 +41,17 @@ jobs:
         echo "INCLUDE=$(python -c "import sysconfig; print(sysconfig.get_path('include'))")"
         echo "LIB=$(python -c "import sysconfig; print(sysconfig.get_config_var('libs'))")"
 
+    - name: Locate Python
+      shell: pwsh
+      run: |
+        $py = python -c "import sys; print(sys.base_prefix)"
+        echo "PYTHONROOT=$py" >> $env:GITHUB_ENV
+        echo "PythonIncludeDir=$py\include" >> $env:GITHUB_ENV
+        echo "PythonLibDir=$py\libs" >> $env:GITHUB_ENV
+        echo "PYTHONROOT=$py"
+        echo "PythonIncludeDir=$py\include"
+        echo "PythonLibDir=$py\libs"
+
     - name: msbuild src/embeddings.vcxproj /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
       shell: cmd
       run: |
