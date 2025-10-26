@@ -50,10 +50,10 @@ jobs:
     - name: msbuild src/embeddings.vcxproj /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
       shell: cmd
       run: |
-        msbuild embeddings.vcxproj `
-          /p:Configuration=${{ matrix.configuration }} `
-          /p:Platform=x64 `
-          /p:PythonIncludeDir="$env:PYTHONROOT\include" `
+        msbuild embeddings.vcxproj
+          /p:Configuration=${{ matrix.configuration }}
+          /p:Platform=x64
+          /p:PythonIncludeDir="$env:PYTHONROOT\include"
           /p:PythonLibDir="$env:PYTHONROOT\libs"
 
     - name: dir /s /b *.dll *.pyd *.exe
