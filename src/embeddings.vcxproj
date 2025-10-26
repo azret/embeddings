@@ -39,8 +39,8 @@
   <PropertyGroup Label="UserMacros" />
   <!-- Python include and libs -->
   <PropertyGroup>
-    <PythonIncludeDir>C:\Python312\include</PythonIncludeDir>
-    <PythonLibDir>C:\Python312\libs</PythonLibDir>
+    <PythonIncludeDir>C:\Python312\include;C:\hostedtoolcache\windows\Python\3.12.x\x64\include;</PythonIncludeDir>
+    <PythonLibDir>C:\Python312\libs;C:\hostedtoolcache\windows\Python\3.12.x\x64\libs;</PythonLibDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <OutDir>$(SolutionDir)$(ProjectName)\</OutDir>

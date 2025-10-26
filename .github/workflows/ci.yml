@@ -39,7 +39,7 @@ jobs:
     - name: environment vars
       run: |
         echo "INCLUDE=$(python -c "import sysconfig; print(sysconfig.get_path('include'))")"
-        echo "LIB=$(python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")"
+        echo "LIB=$(python -c "import sysconfig; print(sysconfig.get_config_var('libs'))")"
 
     - name: msbuild src/embeddings.vcxproj /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
       shell: cmd
