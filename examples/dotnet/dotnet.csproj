@@ -49,10 +49,15 @@
     <Compile Include="..\..\src\embeddings.cs">
       <Link>embeddings.cs</Link>
     </Compile>
+    <Compile Include="cBLAS.cs" />
     <Compile Include="dotnet.cs" />
+    <Compile Include="Intel\Intel.cs" />
+    <Compile Include="Intel\Intel.mkl.cs" />
+    <Compile Include="kernel32.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
   </ItemGroup>
+  <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

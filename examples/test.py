@@ -2,6 +2,13 @@
 
 import os, uuid, random, numpy
 
+import sys, os
+
+for root, dirs, files in os.walk(sys.prefix):
+    for f in files:
+        if f.lower() == "mkl_rt.dll":
+            print(os.path.join(root, f))
+
 numpy.random.seed(0)
 
 numpy.set_printoptions(threshold=7)

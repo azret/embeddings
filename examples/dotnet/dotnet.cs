@@ -10,6 +10,8 @@ namespace dotnet {
     class Demo {
         static unsafe void Main() {
 
+            Console.WriteLine(Intel.mkl.Version.ToString());
+
             IntPtr db = Embeddings.AllocDb();
 
             // OPEN (like mode "a+"): GENERIC_READ | FILE_APPEND_DATA, OPEN_ALWAYS
