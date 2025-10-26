@@ -57,5 +57,4 @@ jobs:
         with:
           name: embeddings-${{ matrix.configuration }}
           path: |
-            **/${{ matrix.configuration }}/*.dll
-            **/${{ matrix.configuration }}/*.pyd
+            src\embeddings\embeddings.pyd
