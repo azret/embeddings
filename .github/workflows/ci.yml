@@ -1,0 +1,49 @@
+name: Build & Test
+
+on:
+  push:
+
+jobs:
+  build-and-test-windows:
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify Python installation
+        run: |
+          python --version
+          where python
+          python -m pip install --upgrade pip setuptools wheel
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '17.0'  # VS 2022
+
+      - name: Locate Python root
+        shell: pwsh
+        run: |
+          $py = python -c "import sys; print(sys.base_prefix)"
+          echo "PYTHONROOT=$py" >> $env:GITHUB_ENV
+
+      - name: Build with MSBuild
+        shell: cmd
+        run: |
+          msbuild src\embeddings.vcxproj ^
+            /p:Configuration=${{ matrix.configuration }} ^
+            /p:Platform=x64 ^
+            /p:PythonIncludeDir="%PYTHONROOT%\include" ^
+            /p:PythonLibDir="%PYTHONROOT%\libs"
