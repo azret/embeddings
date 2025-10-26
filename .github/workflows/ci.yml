@@ -1,0 +1,48 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build-and-test-windows:
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+
+    runs-on: windows-latest
+
+    steps:
+    - name: git pull
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: microsoft/setup-msbuild@v2
+      uses: microsoft/setup-msbuild@v2
+      with:
+        vs-version: '17.0'   # VS 2022
+
+    - name: environment vars
+      run: |
+        echo "INCLUDE=$(python -c "import sysconfig; print(sysconfig.get_path('include'))")"
+        echo "LIB=$(python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")"
+
+    - name: msbuild src/embeddings.vcxproj /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
+      shell: cmd
+      run: |
+        msbuild src/embeddings.vcxproj /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
+
+    - name: dir /s /b *.dll *.pyd *.exe
+      run: |
+        dir /s /b *.dll *.pyd *.exe
+
+    - name: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v4
+      with:
+        name: embeddings-${{ matrix.configuration }}
+        path: |
+          **/${{ matrix.configuration }}/*.dll
+          **/${{ matrix.configuration }}/*.pyd
