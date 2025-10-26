@@ -36,11 +36,6 @@ jobs:
       with:
         vs-version: '17.0'   # VS 2022
 
-    - name: environment vars
-      run: |
-        echo "INCLUDE=$(python -c "import sysconfig; print(sysconfig.get_path('include'))")"
-        echo "LIB=$(python -c "import sysconfig; print(sysconfig.get_config_var('libs'))")"
-
     - name: Locate Python
       shell: pwsh
       run: |
@@ -50,7 +45,7 @@ jobs:
     - name: msbuild src/embeddings.vcxproj /p:Configuration=${{ matrix.configuration }} /p:Platform=x64
       shell: cmd
       run: |
-        msbuild embeddings.vcxproj
+        msbuild src/embeddings.vcxproj
           /p:Configuration=${{ matrix.configuration }}
           /p:Platform=x64
           /p:PythonIncludeDir="$env:PYTHONROOT\include"
