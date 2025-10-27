@@ -1026,13 +1026,22 @@ static BOOL GetFileCreationFlags(const wchar_t* pwszmode, DWORD* disposition, DW
         return TRUE;
     }
     else if (wcscmp(pwszmode, L"a") == 0) {
+        // Append to an existing file. Fail if does not exist.
         *disposition = OPEN_EXISTING;
         *access = FILE_READ_DATA | FILE_APPEND_DATA;
         _dbglog("access=%ls, disposition=%ls\n", L"FILE_READ_DATA | FILE_APPEND_DATA", L"OPEN_EXISTING");
         return TRUE;
     }
     else if (wcscmp(pwszmode, L"a+") == 0) {
+        // Append to an existing file. Create a new one if does not exist.
         *disposition = OPEN_ALWAYS;
+        *access = FILE_READ_DATA | FILE_APPEND_DATA;
+        _dbglog("access=%ls, disposition=%ls\n", L"FILE_READ_DATA | FILE_APPEND_DATA", L"OPEN_ALWAYS");
+        return TRUE;
+    }
+    else if (wcscmp(pwszmode, L"a++") == 0) {
+        // Create a new one awlays.
+        *disposition = CREATE_ALWAYS;
         *access = FILE_READ_DATA | FILE_APPEND_DATA;
         _dbglog("access=%ls, disposition=%ls\n", L"FILE_READ_DATA | FILE_APPEND_DATA", L"OPEN_ALWAYS");
         return TRUE;
