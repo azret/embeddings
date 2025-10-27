@@ -36,7 +36,6 @@ print("Done")
 cur = db.cursor()
 
 cur.reset()
-
 cc = 0
 while True:
     rec = cur.read()
@@ -46,6 +45,7 @@ while True:
     assert numpy.array_equal(numpy.frombuffer(rec[1], dtype=numpy.float32), numpy.array(data[cc][1]))
     if cc < topk:
         print(f"id: {rec[0]}, size: {len(rec[1])}")
+    cur.update(rec[0], rec[1])
     cc += 1
 
 cur.close()
@@ -71,4 +71,4 @@ print(query[0])
 assert results[0][0] == query[0]
 assert results[0][1] == 1.0
 
-print("Pass")
+print("\nPass\n")

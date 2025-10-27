@@ -44,12 +44,14 @@ extern "C" {
 
     #define PATH 1024
 
+#pragma pack(push, 1)
     typedef struct Embeddings {
         HANDLE hWrite;
-        wchar_t wszPath[PATH];
         FileHeader header;
         SYSTEM_INFO os;
+        wchar_t wszPath[PATH];
     } Embeddings;
+#pragma pack(pop)
 
     EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* szPath, DWORD access, DWORD dwCreationDisposition, uint32_t dwBlobSize);
     EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_append(Embeddings* db, uiid id, const void* blob, DWORD blobSize, BOOL bFlush);
@@ -57,10 +59,12 @@ extern "C" {
     EMBEDDINGS_API void EMBEDDINGS_CALL File_close(Embeddings* db);
     EMBEDDINGS_API uint32_t EMBEDDINGS_CALL File_version(Embeddings* db);
 
+#pragma pack(push, 1)
     typedef struct {
         uiid id;
         float score;
     } Score;
+#pragma pack(pop)
 
     EMBEDDINGS_API int32_t EMBEDDINGS_CALL File_search(
         Embeddings* db,
@@ -69,20 +73,24 @@ extern "C" {
         Score* scores,
         float min);
 
+#pragma pack(push, 1)
     typedef struct Cursor {
-        HANDLE hRead;
-        Embeddings* db;
-        uint64_t cc;
+        HANDLE hReadWrite;
+        FileHeader header;
+        LARGE_INTEGER offset;
+        uint32_t cc;
         void* buffer;
         uiid* id;
         uint8_t* blob;
         uint32_t blobSize;
     } Cursor;
+#pragma pack(pop)
 
-    EMBEDDINGS_API Cursor* EMBEDDINGS_CALL Cursor_open(Embeddings* db);
+    EMBEDDINGS_API Cursor* EMBEDDINGS_CALL Cursor_open(Embeddings* db, BOOL bReadOnly);
     EMBEDDINGS_API void EMBEDDINGS_CALL Cursor_close(Cursor* cur);
     EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_reset(Cursor* cur);
     EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_read(Cursor* cur, DWORD* err);
+    EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_update(Cursor* cur, uiid id, const void* blob, DWORD blobSize, BOOL bFlush);
 
 #ifdef __cplusplus
 }

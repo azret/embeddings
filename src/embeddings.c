@@ -1,5 +1,9 @@
 #define EMBEDDINGS_C
 
+#if !defined(_WIN64)
+#error "Only 64-bit builds are supported."
+#endif
+
 #include "embeddings.h"
 #include <assert.h>
 #include <time.h>
@@ -60,7 +64,7 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* pws
         }
         flags = FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_SEQUENTIAL_SCAN;
 		dwCreationDisposition = CREATE_ALWAYS;
-        access = FILE_READ_DATA | FILE_APPEND_DATA;
+        access = FILE_READ_DATA | FILE_APPEND_DATA | FILE_WRITE_DATA;
 		pwszpath = db->wszPath;
     } else {
         if (!GetFullPathNameW(pwszpath, PATH, db->wszPath, NULL)) {
@@ -224,7 +228,7 @@ EMBEDDINGS_API void EMBEDDINGS_CALL File_close(Embeddings* db)
 }
 
 #if defined(_WIN32) || defined(_WIN64)
-static __forceinline int _uiidcmp(const uiid* a, const uiid* b) {
+static __forceinline BOOL _uiidcmp(const uiid* a, const uiid* b) {
     const uint64_t* pa = (const uint64_t*)a->bytes;
     const uint64_t* pb = (const uint64_t*)b->bytes;
     return (pa[0] == pb[0]) && (pa[1] == pb[1]);
@@ -493,8 +497,8 @@ EMBEDDINGS_API void EMBEDDINGS_CALL Cursor_close(Cursor* cur)
     if (!cur) return;
     if (cur->buffer)
         _aligned_free(cur->buffer);
-    if (cur->hRead && cur->hRead != INVALID_HANDLE_VALUE)
-        CloseHandle(cur->hRead);
+    if (cur->hReadWrite && cur->hReadWrite != INVALID_HANDLE_VALUE)
+        CloseHandle(cur->hReadWrite);
     free(cur);
 }
 
@@ -504,12 +508,12 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_reset(Cursor* cur) {
         fprintf(stderr, "The specified cursor pointer is NULL.\n");
         return FALSE;
     }    
-    if (!cur->hRead || cur->hRead == INVALID_HANDLE_VALUE) {
+    if (!cur->hReadWrite || cur->hReadWrite == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "The specified database is closed or invalid.\n");
         return FALSE;
     }
     LARGE_INTEGER offset = { MAXHEAD };
-    if (!SetFilePointerEx(cur->hRead, offset, NULL, FILE_BEGIN))
+    if (!SetFilePointerEx(cur->hReadWrite, offset, NULL, FILE_BEGIN))
     {
         fprintf(stderr, "Failed to seek to the first record (system error %lu).\n", GetLastError());
         return FALSE;
@@ -517,7 +521,7 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_reset(Cursor* cur) {
     return TRUE;
 }
 
-EMBEDDINGS_API Cursor* EMBEDDINGS_CALL Cursor_open(Embeddings * db) {
+EMBEDDINGS_API Cursor* EMBEDDINGS_CALL Cursor_open(Embeddings * db, BOOL bReadOnly) {
     _dbglog("Cursor_open();\n");
     if (!db) {
         fprintf(stderr, "The specified database pointer is NULL.\n");
@@ -533,13 +537,15 @@ EMBEDDINGS_API Cursor* EMBEDDINGS_CALL Cursor_open(Embeddings * db) {
         return NULL;
     }
 	memset(cur, 0, sizeof(*cur));
-    HANDLE hRead = NULL;
+    HANDLE hReadWrite = NULL;
     if (!DuplicateHandle(
         GetCurrentProcess(),
         db->hWrite,
         GetCurrentProcess(),
-        &hRead,
-        FILE_READ_DATA, // The most basic level read possible
+        &hReadWrite,
+        bReadOnly 
+            ? FILE_READ_DATA // The most basic level read possible
+            : FILE_READ_DATA | FILE_WRITE_DATA, // Allow updates
         FALSE,
         0))
     {
@@ -548,27 +554,27 @@ EMBEDDINGS_API Cursor* EMBEDDINGS_CALL Cursor_open(Embeddings * db) {
         return NULL;
     }
     LARGE_INTEGER offset = { MAXHEAD };
-    if (!SetFilePointerEx(hRead, offset, NULL, FILE_BEGIN))
+    if (!SetFilePointerEx(hReadWrite, offset, NULL, FILE_BEGIN))
     {
         free(cur);
         fprintf(stderr, "Failed to seek to the first record (system error %lu).\n", GetLastError());
-        CloseHandle(hRead);
+        CloseHandle(hReadWrite);
         return NULL;
     }
-    cur->db = db;
-    cur->hRead = hRead;
-    size_t cc = __alignup(sizeof(uiid) + db->header.blobSize, db->header.alignment);
-    uint8_t* buffer = (uint8_t*)_aligned_malloc(cc, db->header.alignment);
+    memcpy(&cur->header, &db->header, sizeof(FileHeader));
+    cur->hReadWrite = hReadWrite;
+    size_t cc = __alignup(sizeof(uiid) + cur->header.blobSize, cur->header.alignment);
+    uint8_t* buffer = (uint8_t*)_aligned_malloc(cc, cur->header.alignment);
     if (!buffer) {
         fprintf(stderr, "Memory allocation failed while preparing the read buffer.\n");
-        CloseHandle(hRead);
+        CloseHandle(hReadWrite);
         return NULL;
     }
 	cur->cc = cc;
 	cur->buffer = buffer;
     cur->id = (uiid*)buffer;
     cur->blob = buffer + sizeof(uiid);
-	cur->blobSize = db->header.blobSize;
+	cur->blobSize = cur->header.blobSize;
     return cur;
 }
 
@@ -585,12 +591,20 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_read(Cursor* cur, DWORD* err)
         fprintf(stderr, "The specified cursor pointer is corrupt.\n");
         return FALSE;
     }
-    if (!cur->hRead || cur->hRead == INVALID_HANDLE_VALUE) {
+    if (!cur->hReadWrite || cur->hReadWrite == INVALID_HANDLE_VALUE) {
         if (err) *err = ERROR_INVALID_HANDLE;
         fprintf(stderr, "The specified database is closed or invalid.\n");
         return FALSE;
     }
-    DWORD bytesRead = 0; BOOL ok = ReadFile(cur->hRead, cur->buffer, cur->cc, &bytesRead, NULL);
+    cur->offset.QuadPart = 0;
+    LARGE_INTEGER zero = { 0 };
+    if (!SetFilePointerEx(cur->hReadWrite, zero, &cur->offset, FILE_CURRENT)) {
+		DWORD sys = GetLastError();
+        fprintf(stderr, "GetFilePointerEx failed. (system error %lu).\n", sys);
+        if (err) *err = sys;
+        return FALSE;
+    }
+    DWORD bytesRead = 0; BOOL ok = ReadFile(cur->hReadWrite, cur->buffer, cur->cc, &bytesRead, NULL);
     if (!ok) {
 		DWORD sys = GetLastError();
         if (sys == ERROR_HANDLE_EOF || sys == ERROR_BROKEN_PIPE || sys == NO_ERROR) {
@@ -605,6 +619,88 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_read(Cursor* cur, DWORD* err)
         if (err) *err = ERROR_HANDLE_EOF;
         return FALSE;
     }
+    return TRUE;
+}
+
+EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_update(Cursor* cur, uiid id, const void* blob, DWORD blobSize, BOOL bFlush) {
+    if (!cur) {
+        fprintf(stderr, "The specified cursor pointer is NULL.\n");
+        return FALSE;
+    }
+    if (!cur->hReadWrite || cur->hReadWrite == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "The specified cursor is closed or invalid.\n");
+        return FALSE;
+    }
+    if (!blob) {
+        fprintf(stderr, "The specified blob pointer is NULL.\n");
+        return FALSE;
+    }
+    if (blobSize != cur->blobSize) {
+        fprintf(stderr,
+            "The specified blob size (%u) does not match the database configuration (%u).\n",
+            blobSize,
+            cur->blobSize);
+        return FALSE;
+    }
+    // _dbglog("Cursor_update();\n");
+    OVERLAPPED ov = { 0 };
+    if (!LockFileEx(cur->hReadWrite, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXHEAD, 0, &ov)) {
+        fprintf(stderr, "LockFileEx failed: %lu\n", GetLastError());
+        return FALSE;
+    }
+    LARGE_INTEGER zero = { 0 }; LARGE_INTEGER current = { 0 };
+    // Remember the current file offset.
+    if (!SetFilePointerEx(cur->hReadWrite, zero, &current, FILE_CURRENT)) {
+        DWORD sys = GetLastError();
+        fprintf(stderr, "GetFilePointerEx failed. (system error %lu).\n", sys);
+        UnlockFileEx(cur->hReadWrite, 0, MAXHEAD, 0, &ov);
+        return FALSE;
+    }
+	// Move to the record start. If doing this during the cursor read loop this is as if we are moving (-1) blob.
+    if (!SetFilePointerEx(cur->hReadWrite, cur->offset, NULL, FILE_BEGIN)) {
+        DWORD sys = GetLastError();
+        fprintf(stderr, "SetFilePointerEx to address %08lX:%08lX failed. (system error %lu).\n", cur->offset.HighPart, cur->offset.LowPart, sys);
+        UnlockFileEx(cur->hReadWrite, 0, MAXHEAD, 0, &ov);
+        return FALSE;
+    }
+    uiid idOnDisk; DWORD bytesRead = 0; BOOL ok = ReadFile(cur->hReadWrite, &idOnDisk, sizeof(uiid), &bytesRead, NULL);
+    if (!ok || bytesRead != sizeof(uiid)) {
+        DWORD sys = GetLastError();
+        fprintf(stderr, "ReadFile failed. (system error %lu).\n", sys);
+        UnlockFileEx(cur->hReadWrite, 0, MAXHEAD, 0, &ov);
+        return FALSE;
+	}
+	// Make sure the blob id is the expected one. The first 16 bytes are id followed by blob data.
+    if (_uiidcmp(&idOnDisk, &id) != TRUE) {
+        fprintf(stderr, "Record ID mismatch; expected '");
+        for (int i = 0; i < 16; ++i) fprintf(stderr, "%02X", id.bytes[i]);
+        fprintf(stderr, "', found '");
+        for (int i = 0; i < 16; ++i) fprintf(stderr, "%02X", idOnDisk.bytes[i]);
+        fprintf(stderr, "'.\n");
+        UnlockFileEx(cur->hReadWrite, 0, MAXHEAD, 0, &ov);
+        return FALSE;
+	}
+	// Update just the blob part.
+    DWORD bytesWritten = 0; ok = WriteFile(cur->hReadWrite, blob, blobSize, &bytesWritten, NULL);
+    if (!ok || bytesWritten != blobSize) {
+        fprintf(stderr, "WriteFile failed. (system error %lu).\n", GetLastError());
+        UnlockFileEx(cur->hReadWrite, 0, MAXHEAD, 0, &ov);
+        return FALSE;
+    }
+    // Restore to where we were before.
+    if (!SetFilePointerEx(cur->hReadWrite, current, NULL, FILE_BEGIN)) {
+        DWORD sys = GetLastError();
+        fprintf(stderr, "SetFilePointerEx failed. (system error %lu).\n", sys);
+        UnlockFileEx(cur->hReadWrite, 0, MAXHEAD, 0, &ov);
+        return FALSE;
+    }
+    if (bFlush && !FlushFileBuffers(cur->hReadWrite)) {
+        fprintf(stderr, "Failed to flush data to disk (system error %lu).\n", GetLastError());
+        UnlockFileEx(cur->hReadWrite, 0, MAXHEAD, 0, &ov);
+        return FALSE;
+    }
+    // _dbglog("Cursor_update(OK);\n");
+    UnlockFileEx(cur->hReadWrite, 0, MAXHEAD, 0, &ov);
     return TRUE;
 }
 
@@ -654,7 +750,7 @@ static int PyEmbeddings_init(PyEmbeddingsObject* self, PyObject* args, PyObject*
 static PyEmbeddingsObject* PyEmbeddings_new(PyTypeObject* type, PyObject* args, PyObject* kwds);
 static PyObject* PyEmbeddings_open(PyObject* self, PyObject* args, PyObject* kwds);
 static PyObject* PyEmbeddings_close(PyObject* obj, PyObject* ignored);
-static PyObject* PyEmbeddings_flush(PyObject* obj, PyObject* ignored);
+static PyObject* PyEmbeddings_flush(PyEmbeddingsObject* obj, PyObject* ignored);
 static PyObject* PyEmbeddings_cursor(PyEmbeddingsObject* self, PyObject* Py_UNUSED(args));
 static PyObject* PyEmbeddings_search(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds);
 
@@ -779,9 +875,66 @@ static PyObject* PyCursor_close(PyCursorObject* self, PyObject* Py_UNUSED(args))
     Py_RETURN_NONE;
 }
 
+static PyObject* PyCursor_update(PyCursorObject* self, PyObject* args, PyObject* kwds)
+{
+    _dbglog("PyCursor_update()\n");
+    PyObject* id = NULL;
+    Py_buffer blob = { 0 };
+    BOOL bFlush = TRUE;
+    static char* kwlist[] = { "id", "blob", "flush", NULL };
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Oy*|p", kwlist, &id, &blob, &bFlush))
+        return NULL;
+    uiid u;
+    memset(&u, 0, sizeof(u));
+    /* Case 1: id is bytes */
+    if (PyBytes_Check(id)) {
+        Py_ssize_t len = PyBytes_Size(id);
+        if (len != sizeof(u.bytes)) {
+            PyErr_SetString(PyExc_ValueError, "'id' must be exactly 16 bytes");
+            goto error;
+        }
+        memcpy(u.bytes, PyBytes_AsString(id), sizeof(u.bytes));
+    }
+    /* Case 2: id is uuid.UUID */
+    else {
+        PyObject* typename = PyObject_GetAttrString((PyObject*)Py_TYPE(id), "__name__");
+        if (!typename) goto error;
+        int ok = PyUnicode_Check(typename) &&
+            PyUnicode_CompareWithASCIIString(typename, "UUID") == 0;
+        Py_DECREF(typename);
+        if (ok) {
+            PyObject* b = PyObject_GetAttrString(id, "bytes");
+            if (!b) goto error;
+            if (!PyBytes_Check(b) || PyBytes_Size(b) != sizeof(u.bytes)) {
+                PyErr_SetString(PyExc_ValueError, "'UUID.bytes' must be exactly 16 bytes");
+                Py_DECREF(b);
+                goto error;
+            }
+            memcpy(u.bytes, PyBytes_AsString(b), sizeof(u.bytes));
+            Py_DECREF(b);
+        }
+        else {
+            PyErr_SetString(PyExc_TypeError, "'id' must be bytes or uuid.UUID");
+            goto error;
+        }
+    }
+    /* Update the record */
+    if (!Cursor_update(self->cur, u, blob.buf, (DWORD)blob.len, bFlush)) {
+        PyErr_SetString(PyExc_OSError, "Cursor_update failed");
+        goto error;
+    }
+    PyBuffer_Release(&blob);
+    Py_RETURN_NONE;
+error:
+    PyBuffer_Release(&blob);
+    return NULL;
+}
+
 static PyMethodDef PyCursor_methods[] = {
     {"read",  (PyCFunction)PyCursor_read,  METH_NOARGS,
      "Read the next record. Returns the record or None if EOF."},
+    {"update",  (PyCFunction)PyCursor_update,  METH_VARARGS | METH_KEYWORDS,
+     "Update the current record."},
     {"reset", (PyCFunction)PyCursor_reset, METH_NOARGS,
      "Rewind cursor to the first record."},
     {"close", (PyCFunction)PyCursor_close, METH_NOARGS,
@@ -817,7 +970,7 @@ static PyObject* PyEmbeddings_cursor(PyEmbeddingsObject* self, PyObject* Py_UNUS
         PyErr_SetString(PyExc_RuntimeError, "Database is closed.");
         return NULL;
     }
-    Cursor* cur = Cursor_open(&self->db);
+    Cursor* cur = Cursor_open(&self->db, FALSE);
     if (!cur) {
         PyErr_SetString(PyExc_OSError, "Failed to create cursor.");
         return NULL;
