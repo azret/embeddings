@@ -14,7 +14,7 @@
 #define __alignup(x,a)  (((x) + ((a) - 1)) & ~((a) - 1))
 
 #if !defined(DEBUGGING)
-#define _dbglog
+#define _dbglog(...) ((void)0)
 #endif
 
 #if !defined(_dbglog)
@@ -36,7 +36,7 @@
 #define MAXHEAD 4096
 #define MAXBLOB 65536
 
-static inline uint32_t __bytwo(uint32_t x)
+static inline uint32_t powoftwo(uint32_t x)
 {
     if (x == 0) return 1;
     x--;
@@ -49,18 +49,20 @@ static inline uint32_t __bytwo(uint32_t x)
     return x;
 }
 
-EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* pwszpath, DWORD access, DWORD dwCreationDisposition, uint32_t dwBlobSize)
+EMBEDDINGS_API Embeddings* EMBEDDINGS_CALL fileopen(const wchar_t* pwszpath, DWORD access, DWORD dwCreationDisposition, uint32_t dwBlobSize)
 {
-    _dbglog("File_open(path='%ls' blob=%u access=0x%08X, disposition=0x%08X);\n", pwszpath, dwBlobSize, access, dwCreationDisposition);
+	Embeddings* db = malloc(sizeof(Embeddings));
+    _dbglog(">> fileopen(path='%ls' blob=%u access=0x%08X, disposition=0x%08X);\n", pwszpath, dwBlobSize, access, dwCreationDisposition);
     memset(db, 0, sizeof(*db));
     DWORD flags;
     assert(PATH >= MAX_PATH);
-    if (!pwszpath) {
+    if (!pwszpath || wcscmp(pwszpath, L":temp:") == 0) {
         wchar_t userTempFolder[PATH];
         GetTempPathW(PATH, userTempFolder);
         if (!GetTempFileNameW(userTempFolder, L"embeddings", 0, db->wszPath)) {
+            free(db);
             fprintf(stderr, "Failed to create a temporary file name: %lu\n", GetLastError());
-            return FALSE;
+            return NULL;
         }
         flags = FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_SEQUENTIAL_SCAN;
 		dwCreationDisposition = CREATE_ALWAYS;
@@ -68,8 +70,9 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* pws
 		pwszpath = db->wszPath;
     } else {
         if (!GetFullPathNameW(pwszpath, PATH, db->wszPath, NULL)) {
+            free(db);
             fprintf(stderr, "GetFullPathNameW failed: %lu\n", GetLastError());
-            return FALSE;
+            return NULL;
         }
         flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
         pwszpath = db->wszPath;
@@ -83,12 +86,15 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* pws
     db->os.dwPageSize = db->os.dwPageSize ? db->os.dwPageSize : 4096;
     db->os.dwAllocationGranularity = db->os.dwAllocationGranularity ? db->os.dwAllocationGranularity : 65536;
 	if (dwBlobSize > MAXBLOB) {
-        return FALSE;
+        free(db);
+        fprintf(stderr, "Maximum blob Size is %lu.\n", MAXBLOB);
+        return NULL;
     }
     if (dwBlobSize > 0) {
         if ((dwBlobSize % sizeof(float)) != 0) {
+            free(db);
             fprintf(stderr, "Blob size must be a multiple of %zu (size of float32).\n", sizeof(float));
-            return FALSE;
+            return NULL;
         }
     }
     memset(&db->header, 0, sizeof(db->header));
@@ -104,15 +110,22 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* pws
         // For small blobs, align to next power of two, minimum 64 bytes
         uint32_t align = (dwBlobSize == 0)
             ? sizeof(uiid)
-            : __bytwo(dwBlobSize + sizeof(uiid)); // next power of two
-        db->header.alignment = max(align, sizeof(uiid));
+            : powoftwo(dwBlobSize + sizeof(uiid));
+        /* ensure power-of-two minimum of 64 */
+        align = (align < 64) ? 64 : align;
+        /* align MUST be power-of-two; if you change sizeof(uiid), re-assert here */
+        assert((align & (align - 1)) == 0);
+        db->header.alignment = align;
     }
     db->header.blobSize = dwBlobSize;
 	// Header is always aligned to 4096 bytes no matter the system page size.
     if (__alignup(db->header.size, MAXHEAD) > MAXHEAD) {
+        free(db);
         fprintf(stderr, "Invalid header size.\n");
-        return FALSE;
+        return NULL;
     }
+	db->access = access;
+	db->dwCreationDisposition = dwCreationDisposition;
     db->hWrite = CreateFileW(pwszpath,
         access,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -121,46 +134,52 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* pws
         flags,
         NULL);
     if (!db->hWrite || db->hWrite == INVALID_HANDLE_VALUE) {
+        free(db);
         fprintf(stderr, "CreateFileW failed: %lu\n", GetLastError());
-        return FALSE;
+        return NULL;
     }
     OVERLAPPED ov = { 0 };
     if (!LockFileEx(db->hWrite, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXHEAD, 0, &ov)) {
-        fprintf(stderr, "LockFileEx failed: %lu\n", GetLastError());
         CloseHandle(db->hWrite);
-        return FALSE;
+        free(db);
+        fprintf(stderr, "LockFileEx failed: %lu\n", GetLastError());
+        return NULL;
     }
     LARGE_INTEGER fileSize;
     if (!GetFileSizeEx(db->hWrite, &fileSize)) {
         UnlockFileEx(db->hWrite, 0, MAXHEAD, 0, &ov);
         CloseHandle(db->hWrite);
-        return FALSE;
+        free(db);
+        return NULL;
     }
     if (fileSize.QuadPart == 0) {
 		assert(db->header.size <= MAXHEAD);
         uint8_t* buff = (uint8_t*)_aligned_malloc(MAXHEAD, MAXHEAD);
         if (!buff) {
-            fprintf(stderr, "Memory allocation failed\n");
             UnlockFileEx(db->hWrite, 0, MAXHEAD, 0, &ov);
             CloseHandle(db->hWrite);
-            return FALSE;
+            free(db);
+            fprintf(stderr, "Memory allocation failed\n");
+            return NULL;
         }
         memset(buff, 0, MAXHEAD);
         errno_t err = memcpy_s(buff, MAXHEAD, &db->header, sizeof(db->header));
         if (err) {
-            fprintf(stderr, "memcpy_s failed (%d)\n", err);
             _aligned_free(buff);
             UnlockFileEx(db->hWrite, 0, MAXHEAD, 0, &ov);
             CloseHandle(db->hWrite);
-            return FALSE;
+            free(db);
+            fprintf(stderr, "memcpy_s failed (%d)\n", err);
+            return NULL;
         }
         LARGE_INTEGER zero = { 0 };
         if (!SetFilePointerEx(db->hWrite, zero, NULL, FILE_BEGIN)) {
-            fprintf(stderr, "SetFilePointerEx failed: %lu\n", GetLastError());
             _aligned_free(buff);
             UnlockFileEx(db->hWrite, 0, MAXHEAD, 0, &ov);
             CloseHandle(db->hWrite);
-            return FALSE;
+            free(db);
+            fprintf(stderr, "SetFilePointerEx failed: %lu\n", GetLastError());
+            return NULL;
         }
         DWORD written = 0;
         if (!WriteFile(db->hWrite, buff, MAXHEAD, &written, NULL) || written != MAXHEAD) {
@@ -168,7 +187,8 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* pws
             _aligned_free(buff);
             UnlockFileEx(db->hWrite, 0, MAXHEAD, 0, &ov);
             CloseHandle(db->hWrite);
-            return FALSE;
+            free(db);
+            return NULL;
         }
         FlushFileBuffers(db->hWrite);
         _aligned_free(buff);
@@ -179,14 +199,16 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* pws
             fprintf(stderr, "SetFilePointerEx failed: %lu\n", GetLastError());
             UnlockFileEx(db->hWrite, 0, MAXHEAD, 0, &ov);
             CloseHandle(db->hWrite);
-            return FALSE;
+            free(db);
+            return NULL;
         }
         DWORD read = 0;
         if (!ReadFile(db->hWrite, &db->header, sizeof(db->header), &read, NULL) ||
             read != sizeof(db->header)) {
             UnlockFileEx(db->hWrite, 0, MAXHEAD, 0, &ov);
             CloseHandle(db->hWrite);
-            return FALSE;
+            free(db);
+            return NULL;
         }
         if (memcmp(db->header.magic, kMagic, sizeof(kMagic) - 1) != 0 ||
             db->header.version != VERSION ||
@@ -194,13 +216,15 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* pws
             fprintf(stderr, "Invalid or mismatched DB format\n");
             UnlockFileEx(db->hWrite, 0, MAXHEAD, 0, &ov);
             CloseHandle(db->hWrite);
-            return FALSE;
+            free(db);
+            return NULL;
         }
         if (db->header.blobSize != dwBlobSize) {
             fprintf(stderr, "Invalid blob size.\n");
             UnlockFileEx(db->hWrite, 0, MAXHEAD, 0, &ov);
             CloseHandle(db->hWrite);
-            return FALSE;
+            free(db);
+            return NULL;
         }
         if (db->header.alignment != db->os.dwPageSize) {
             if (db->header.alignment > db->os.dwPageSize) {
@@ -208,23 +232,24 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* pws
                     db->header.alignment, db->os.dwPageSize);
                 UnlockFileEx(db->hWrite, 0, MAXHEAD, 0, &ov);
                 CloseHandle(db->hWrite);
-                return FALSE;
+                free(db);
+                return NULL;
             }
             fprintf(stderr, "Warning: file created with alignment=%u (system=%u)\n",
                 db->header.alignment, db->os.dwPageSize);
         }
     }
     UnlockFileEx(db->hWrite, 0, MAXHEAD, 0, &ov);
-    return TRUE;
+    return db;
 }
 
-EMBEDDINGS_API void EMBEDDINGS_CALL File_close(Embeddings* db)
+EMBEDDINGS_API void EMBEDDINGS_CALL fileclose(Embeddings* db)
 {
-    _dbglog("File_close();\n");
+    _dbglog("fileclose();\n");
     if (!db) return;
     if (db->hWrite && db->hWrite != INVALID_HANDLE_VALUE)
         CloseHandle(db->hWrite);
-    memset(db, 0, sizeof(*db));
+    free(db);
 }
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -252,7 +277,7 @@ static inline uint64_t _uiidhash(uiid* a) {
 }
 #endif
 
-EMBEDDINGS_API uint32_t EMBEDDINGS_CALL File_version(Embeddings* db) {
+EMBEDDINGS_API uint32_t EMBEDDINGS_CALL fileversion(Embeddings* db) {
     if (!db) {
         fprintf(stderr, "The specified database pointer is NULL.\n");
         return 0;
@@ -260,7 +285,8 @@ EMBEDDINGS_API uint32_t EMBEDDINGS_CALL File_version(Embeddings* db) {
 	return db->header.version;
 }
 
-EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_append(Embeddings* db, uiid id, const void* blob, DWORD blobSize, BOOL bFlush) {
+//  Warning: Does not lock. Assumes FILE_APPEND_DATA.
+EMBEDDINGS_API BOOL EMBEDDINGS_CALL fileappend(Embeddings* db, uiid id, const void* blob, DWORD blobSize, BOOL bFlush) {
     if (!db) {
         fprintf(stderr, "The specified database pointer is NULL.\n");
         return FALSE;
@@ -299,11 +325,17 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_append(Embeddings* db, uiid id, const v
         _aligned_free(buff);
         return FALSE;
     }
-    LARGE_INTEGER zero = { 0 };
-    if (!SetFilePointerEx(db->hWrite, zero, NULL, FILE_END)) {
-        fprintf(stderr, "Failed to seek to the end of the database file (system error %lu).\n", GetLastError());
-        _aligned_free(buff);
-        return FALSE;
+    if (db->access & FILE_APPEND_DATA) {
+        /* Move to end is automatic */
+    }
+    else {
+        fprintf(stderr, "WARNING: File was open without FILE_APPEND_DATA. Performing explicit seek to EOF.\n");
+        LARGE_INTEGER zero = { 0 };
+        if (!SetFilePointerEx(db->hWrite, zero, NULL, FILE_END)) {
+            fprintf(stderr, "Failed to seek to the end of the database file (system error %lu).\n", GetLastError());
+            _aligned_free(buff);
+            return FALSE;
+        }
     }
     DWORD written = 0;
     BOOL bOk = WriteFile(db->hWrite, buff, cc, &written, NULL);
@@ -325,8 +357,8 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_append(Embeddings* db, uiid id, const v
     return TRUE;
 }
 
-EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_flush(Embeddings* db) {
-    _dbglog("File_flush();\n");
+EMBEDDINGS_API BOOL EMBEDDINGS_CALL fileflush(Embeddings* db) {
+    _dbglog("fileflush();\n");
     if (!db) {
         fprintf(stderr, "The specified database pointer is NULL.\n");
         return FALSE;
@@ -360,14 +392,15 @@ static inline float _normf(const float* a, DWORD n) {
 
 const float EPSILON = 1e-6f;
 
-EMBEDDINGS_API int32_t EMBEDDINGS_CALL File_search(
+EMBEDDINGS_API int32_t EMBEDDINGS_CALL cosinesearch(
     Embeddings* db,
     const float* query, uint32_t len,
     uint32_t topk,
     Score* scores,
-    float min)
+    float min,
+    BOOL bNorm)
 {
-    _dbglog("File_search(min = %f);\n", min);
+    _dbglog("filesearch(min = %f);\n", min);
     if (!db) {
         fprintf(stderr, "The specified database pointer is NULL.\n");
         return -1;
@@ -427,8 +460,9 @@ EMBEDDINGS_API int32_t EMBEDDINGS_CALL File_search(
         CloseHandle(hRead);
         return -1;
     }
-    /* Normalize the query vector. We'll make this optional later. */
-    float qnorm = _normf(query, len);
+    float qnorm = bNorm
+        ? _normf(query, len)
+        : 1;
     _dbglog("qnorm = %f;\n", qnorm);
     if (qnorm < EPSILON) {
         fprintf(stderr, "Query vector norm too small (%.8g).\n", qnorm);
@@ -449,10 +483,11 @@ EMBEDDINGS_API int32_t EMBEDDINGS_CALL File_search(
             // _dbglog("partial read expected: %lu, read: %lu\n", (unsigned long)cc, (unsigned long)bytesRead);
             break;
 		}
-        //  && bytesRead == cc
         const uiid* id = (const uiid*)buff;
         const float* blob = (const float*)(buff + sizeof(uiid));
-        float norm = _normf(blob, len);
+        float norm = bNorm
+            ? _normf(blob, len)
+            : 1;
         // _dbglog("norm = %f;\n", norm);
         if (norm < EPSILON)
             continue;
@@ -487,11 +522,11 @@ EMBEDDINGS_API int32_t EMBEDDINGS_CALL File_search(
     free(heap);
     _aligned_free(buff);
     CloseHandle(hRead);
-    _dbglog("File_search() = %d;\n", count);
+    _dbglog("filesearch() = %d;\n", count);
     return count;
 }
 
-EMBEDDINGS_API void EMBEDDINGS_CALL Cursor_close(Cursor* cur)
+EMBEDDINGS_API void EMBEDDINGS_CALL cursorclose(Cursor* cur)
 {
     _dbglog("Cursor_close();\n");
     if (!cur) return;
@@ -502,7 +537,7 @@ EMBEDDINGS_API void EMBEDDINGS_CALL Cursor_close(Cursor* cur)
     free(cur);
 }
 
-EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_reset(Cursor* cur) {
+EMBEDDINGS_API BOOL EMBEDDINGS_CALL cursorreset(Cursor* cur) {
     _dbglog("Cursor_reset();\n");
     if (!cur) {
         fprintf(stderr, "The specified cursor pointer is NULL.\n");
@@ -521,8 +556,8 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_reset(Cursor* cur) {
     return TRUE;
 }
 
-EMBEDDINGS_API Cursor* EMBEDDINGS_CALL Cursor_open(Embeddings * db, BOOL bReadOnly) {
-    _dbglog("Cursor_open();\n");
+EMBEDDINGS_API Cursor* EMBEDDINGS_CALL cursoropen(Embeddings * db, BOOL bReadOnly) {
+    _dbglog("cursoropen(bReadOnly=%d);\n", bReadOnly);
     if (!db) {
         fprintf(stderr, "The specified database pointer is NULL.\n");
         return NULL;
@@ -543,7 +578,7 @@ EMBEDDINGS_API Cursor* EMBEDDINGS_CALL Cursor_open(Embeddings * db, BOOL bReadOn
         db->hWrite,
         GetCurrentProcess(),
         &hReadWrite,
-        bReadOnly 
+        bReadOnly
             ? FILE_READ_DATA // The most basic level read possible
             : FILE_READ_DATA | FILE_WRITE_DATA, // Allow updates
         FALSE,
@@ -578,7 +613,7 @@ EMBEDDINGS_API Cursor* EMBEDDINGS_CALL Cursor_open(Embeddings * db, BOOL bReadOn
     return cur;
 }
 
-EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_read(Cursor* cur, DWORD* err)
+EMBEDDINGS_API BOOL EMBEDDINGS_CALL cursorread(Cursor* cur, DWORD* err)
 {
     if (err) *err = NOERROR;
     if (!cur) {
@@ -622,7 +657,7 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_read(Cursor* cur, DWORD* err)
     return TRUE;
 }
 
-EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_update(Cursor* cur, uiid id, const void* blob, DWORD blobSize, BOOL bFlush) {
+EMBEDDINGS_API BOOL EMBEDDINGS_CALL cursorupdate(Cursor* cur, uiid id, const void* blob, DWORD blobSize, BOOL bFlush) {
     if (!cur) {
         fprintf(stderr, "The specified cursor pointer is NULL.\n");
         return FALSE;
@@ -731,7 +766,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  reason,LPVOID lpReserved)
 
 typedef struct {
     PyObject_HEAD
-    Embeddings db;
+    Embeddings* db;
 } PyEmbeddingsObject;
 
 
@@ -744,24 +779,24 @@ typedef struct {
 
 /* Forward declarations */
 
-static PyObject* PyEmbeddings_append(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds);
-static void PyEmbeddings_dealloc(PyEmbeddingsObject* self);
-static int PyEmbeddings_init(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds);
-static PyEmbeddingsObject* PyEmbeddings_new(PyTypeObject* type, PyObject* args, PyObject* kwds);
-static PyObject* PyEmbeddings_open(PyObject* self, PyObject* args, PyObject* kwds);
-static PyObject* PyEmbeddings_close(PyObject* obj, PyObject* ignored);
-static PyObject* PyEmbeddings_flush(PyEmbeddingsObject* obj, PyObject* ignored);
-static PyObject* PyEmbeddings_cursor(PyEmbeddingsObject* self, PyObject* Py_UNUSED(args));
-static PyObject* PyEmbeddings_search(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds);
+static PyObject* PyEmbeddings_Append(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds);
+static void PyEmbeddings_Dealloc(PyEmbeddingsObject* self);
+static int PyEmbeddings_Init(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds);
+static PyEmbeddingsObject* PyEmbeddings_New(PyTypeObject* type, PyObject* args, PyObject* kwds);
+static PyObject* PyEmbeddings_Open(PyObject* self, PyObject* args, PyObject* kwds);
+static PyObject* PyEmbeddings_Close(PyObject* obj, PyObject* ignored);
+static PyObject* PyEmbeddings_Flush(PyEmbeddingsObject* obj, PyObject* ignored);
+static PyObject* PyEmbeddings_Cursor(PyEmbeddingsObject* self, PyObject* Py_UNUSED(args));
+static PyObject* PyEmbeddings_Search(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds);
 
 /* Method definitions */
 
 static PyMethodDef PyEmbeddingsMethods[] = {
-    {"flush", (PyCFunction)PyEmbeddings_flush, METH_NOARGS, "Flushes the buffers and causes all buffered data to be written to a file."},
-    {"close", (PyCFunction)PyEmbeddings_close, METH_NOARGS, "Close the embeddings database file and release resources."},
-    {"append", (PyCFunction)PyEmbeddings_append, METH_VARARGS | METH_KEYWORDS, "Append a record to the embeddings database." },
-    {"cursor",(PyCFunction)PyEmbeddings_cursor, METH_NOARGS, "Create a cursor for sequential scan."},
-    {"search", (PyCFunction)PyEmbeddings_search, METH_VARARGS | METH_KEYWORDS, "Perform cosine similarity search."},
+    {"flush", (PyCFunction)PyEmbeddings_Flush, METH_NOARGS, "Flushes the buffers and causes all buffered data to be written to a file."},
+    {"close", (PyCFunction)PyEmbeddings_Close, METH_NOARGS, "Close the embeddings database file and release resources."},
+    {"append", (PyCFunction)PyEmbeddings_Append, METH_VARARGS | METH_KEYWORDS, "Append a record to the embeddings database." },
+    {"cursor",(PyCFunction)PyEmbeddings_Cursor, METH_NOARGS, "Create a cursor for sequential scan."},
+    {"search", (PyCFunction)PyEmbeddings_Search, METH_VARARGS | METH_KEYWORDS, "Perform cosine similarity search."},
     {NULL}  /* Sentinel */
 };
 
@@ -772,16 +807,16 @@ static PyTypeObject PyEmbeddings = {
     .tp_name = "embeddings.Embeddings",
     .tp_basicsize = sizeof(PyEmbeddingsObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = PyEmbeddings_new,
-    .tp_init = (initproc)PyEmbeddings_init,
-    .tp_dealloc = (destructor)PyEmbeddings_dealloc,
+    .tp_new = PyEmbeddings_New,
+    .tp_init = (initproc)PyEmbeddings_Init,
+    .tp_dealloc = (destructor)PyEmbeddings_Dealloc,
     .tp_methods = PyEmbeddingsMethods,
 };
 
 /* Module methods */
 
 static PyMethodDef PyModuleStatic[] = {
-    {"open", (PyCFunction)PyEmbeddings_open, METH_VARARGS | METH_KEYWORDS, "Open or create an embeddings database file."},
+    {"open", (PyCFunction)PyEmbeddings_Open, METH_VARARGS | METH_KEYWORDS, "Open or create an embeddings database file."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -798,18 +833,18 @@ static struct PyModuleDef PyModule = {
 
 /* Implementation of methods */
 
-static void PyCursor_dealloc(PyCursorObject* self)
+static void PyCursor_Dealloc(PyCursorObject* self)
 {
-    _dbglog("PyCursor_dealloc();\n");
+    _dbglog("PyCursor_Dealloc();\n");
     if (self->cur) {
-        Cursor_close(self->cur);
+        cursorclose(self->cur);
         self->cur = NULL;
     }
     Py_XDECREF(self->py_db_owner);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static PyObject* PyCursor_tuple(Cursor* cur)
+static PyObject* PyCursor_Tuple(Cursor* cur)
 {
     // _dbglog("PyCursor_tuple();\n");
     PyObject* id = PyBytes_FromStringAndSize((const char*)cur->id, (Py_ssize_t)sizeof(uiid));
@@ -840,7 +875,7 @@ static PyObject* PyCursor_read(PyCursorObject* self, PyObject* Py_UNUSED(args))
         return NULL;
     }
     DWORD err;
-    BOOL ok = Cursor_read(
+    BOOL ok = cursorread(
         self->cur, &err
     );
     if (!ok) {
@@ -850,34 +885,34 @@ static PyObject* PyCursor_read(PyCursorObject* self, PyObject* Py_UNUSED(args))
         PyErr_Format(PyExc_OSError, "Read failed (WinError %lu)", (unsigned long)err);
         return NULL;
     }
-    return PyCursor_tuple(self->cur);
+    return PyCursor_Tuple(self->cur);
 }
 
-static PyObject* PyCursor_reset(PyCursorObject* self, PyObject* Py_UNUSED(args))
+static PyObject* PyCursorReset(PyCursorObject* self, PyObject* Py_UNUSED(args))
 {
     if (!self->cur) {
         PyErr_SetString(PyExc_RuntimeError, "Cursor is closed.");
         return NULL;
     }
-    if (!Cursor_reset(self->cur)) {
+    if (!cursorreset(self->cur)) {
         PyErr_SetString(PyExc_OSError, "Failed to reset cursor to beginning.");
         return NULL;
     }
     Py_RETURN_NONE;
 }
 
-static PyObject* PyCursor_close(PyCursorObject* self, PyObject* Py_UNUSED(args))
+static PyObject* PyCursorClose(PyCursorObject* self, PyObject* Py_UNUSED(args))
 {
     if (self->cur) {
-        Cursor_close(self->cur);
+        cursorclose(self->cur);
         self->cur = NULL;
     }
     Py_RETURN_NONE;
 }
 
-static PyObject* PyCursor_update(PyCursorObject* self, PyObject* args, PyObject* kwds)
+static PyObject* PyCursorUpdate(PyCursorObject* self, PyObject* args, PyObject* kwds)
 {
-    _dbglog("PyCursor_update()\n");
+    // _dbglog("PyCursor_update()\n");
     PyObject* id = NULL;
     Py_buffer blob = { 0 };
     BOOL bFlush = TRUE;
@@ -919,7 +954,7 @@ static PyObject* PyCursor_update(PyCursorObject* self, PyObject* args, PyObject*
         }
     }
     /* Update the record */
-    if (!Cursor_update(self->cur, u, blob.buf, (DWORD)blob.len, bFlush)) {
+    if (!cursorupdate(self->cur, u, blob.buf, (DWORD)blob.len, bFlush)) {
         PyErr_SetString(PyExc_OSError, "Cursor_update failed");
         goto error;
     }
@@ -930,14 +965,14 @@ error:
     return NULL;
 }
 
-static PyMethodDef PyCursor_methods[] = {
+static PyMethodDef PyCursorMethods[] = {
     {"read",  (PyCFunction)PyCursor_read,  METH_NOARGS,
      "Read the next record. Returns the record or None if EOF."},
-    {"update",  (PyCFunction)PyCursor_update,  METH_VARARGS | METH_KEYWORDS,
+    {"update",  (PyCFunction)PyCursorUpdate,  METH_VARARGS | METH_KEYWORDS,
      "Update the current record."},
-    {"reset", (PyCFunction)PyCursor_reset, METH_NOARGS,
+    {"reset", (PyCFunction)PyCursorReset, METH_NOARGS,
      "Rewind cursor to the first record."},
-    {"close", (PyCFunction)PyCursor_close, METH_NOARGS,
+    {"close", (PyCFunction)PyCursorClose, METH_NOARGS,
      "Close the cursor and release resources."},
     {NULL, NULL, 0, NULL}
 };
@@ -949,68 +984,68 @@ static PyTypeObject PyCursorType = {
     .tp_itemsize = 0,
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_doc = "Embeddings DB cursor",
-    .tp_dealloc = (destructor)PyCursor_dealloc,
-    .tp_methods = PyCursor_methods,
+    .tp_dealloc = (destructor)PyCursor_Dealloc,
+    .tp_methods = PyCursorMethods,
 };
 
-static PyEmbeddingsObject* PyEmbeddings_new(PyTypeObject* type, PyObject* args, PyObject* kwds)
+static PyEmbeddingsObject* PyEmbeddings_New(PyTypeObject* type, PyObject* args, PyObject* kwds)
 {
-    _dbglog("PyEmbeddings_new();\n");
+    _dbglog("PyEmbeddings_New();\n");
     PyEmbeddingsObject* self;
     self = (PyEmbeddingsObject*)type->tp_alloc(type, 0);
-    if (self != NULL) {
-		memset(&self->db, 0, sizeof(self->db));
+    if (self) {
+        self->db = NULL;
     }
     return self;
 }
 
-static PyObject* PyEmbeddings_cursor(PyEmbeddingsObject* self, PyObject* Py_UNUSED(args)) {
-    _dbglog("PyEmbeddings_cursor();\n");
-    if (!self->db.hWrite || self->db.hWrite == INVALID_HANDLE_VALUE) {
+static PyObject* PyEmbeddings_Cursor(PyEmbeddingsObject* self, PyObject* Py_UNUSED(args)) {
+    _dbglog("PyEmbeddings_Cursor();\n");
+    if (!self->db->hWrite || self->db->hWrite == INVALID_HANDLE_VALUE) {
         PyErr_SetString(PyExc_RuntimeError, "Database is closed.");
         return NULL;
     }
-    Cursor* cur = Cursor_open(&self->db, FALSE);
+    Cursor* cur = cursoropen(self->db, FALSE);
     if (!cur) {
         PyErr_SetString(PyExc_OSError, "Failed to create cursor.");
         return NULL;
     }
     PyCursorObject* pycur = (PyCursorObject*)PyObject_CallObject((PyObject*)&PyCursorType, NULL);
     if (!pycur) {
-        Cursor_close(cur);
+        cursorclose(cur);
         return NULL;
     }
     pycur->cur = cur;
     // Keep DB alive while cursor exists
     Py_INCREF(self);
     pycur->py_db_owner = (PyObject*)self;
-    _dbglog("PyEmbeddings_cursor return();\n");
+    _dbglog("PyEmbeddings_Cursor return();\n");
     return (PyObject*)pycur;
 }
 
-static PyObject* PyEmbeddings_close(PyObject* obj, PyObject* ignored)
+static PyObject* PyEmbeddings_Close(PyObject* obj, PyObject* ignored)
 {
     _dbglog("PyEmbeddings_close()\n");
     if (obj) {
         PyEmbeddingsObject* self = (PyEmbeddingsObject*)obj;
-        File_close(&self->db);
-        memset(&self->db, 0, sizeof(self->db));
+        fileclose(self->db);
+        self->db = NULL;
     }
     Py_RETURN_NONE;
 }
 
-static PyObject* PyEmbeddings_flush(PyEmbeddingsObject* obj, PyObject* ignored)
+static PyObject* PyEmbeddings_Flush(PyEmbeddingsObject* obj, PyObject* ignored)
 {
     _dbglog("PyEmbeddings_flush()\n");
-    if (!obj->db.hWrite || obj->db.hWrite == INVALID_HANDLE_VALUE) {
+    if (!obj->db->hWrite || obj->db->hWrite == INVALID_HANDLE_VALUE) {
         PyErr_SetString(PyExc_RuntimeError, "Database is closed.");
         return NULL;
     }
-    File_flush(&obj->db);
+    fileflush(obj->db);
     Py_RETURN_NONE;
 }
 
-static PyObject* PyEmbeddings_open(PyObject* obj, PyObject* args, PyObject* kwds)
+static PyObject* PyEmbeddings_Open(PyObject* obj, PyObject* args, PyObject* kwds)
 {
     _dbglog("PyEmbeddings_open();\n");
     PyObject* type = (PyObject*)&PyEmbeddings;
@@ -1028,22 +1063,22 @@ static BOOL GetFileCreationFlags(const wchar_t* pwszmode, DWORD* disposition, DW
     else if (wcscmp(pwszmode, L"a") == 0) {
         // Append to an existing file. Fail if does not exist.
         *disposition = OPEN_EXISTING;
-        *access = FILE_READ_DATA | FILE_APPEND_DATA;
+        *access = FILE_READ_DATA | FILE_APPEND_DATA | FILE_WRITE_DATA;
         _dbglog("access=%ls, disposition=%ls\n", L"FILE_READ_DATA | FILE_APPEND_DATA", L"OPEN_EXISTING");
         return TRUE;
     }
     else if (wcscmp(pwszmode, L"a+") == 0) {
         // Append to an existing file. Create a new one if does not exist.
         *disposition = OPEN_ALWAYS;
-        *access = FILE_READ_DATA | FILE_APPEND_DATA;
+        *access = FILE_READ_DATA | FILE_APPEND_DATA | FILE_WRITE_DATA;
         _dbglog("access=%ls, disposition=%ls\n", L"FILE_READ_DATA | FILE_APPEND_DATA", L"OPEN_ALWAYS");
         return TRUE;
     }
     else if (wcscmp(pwszmode, L"a++") == 0) {
         // Create a new one awlays.
         *disposition = CREATE_ALWAYS;
-        *access = FILE_READ_DATA | FILE_APPEND_DATA;
-        _dbglog("access=%ls, disposition=%ls\n", L"FILE_READ_DATA | FILE_APPEND_DATA", L"OPEN_ALWAYS");
+        *access = FILE_READ_DATA | FILE_APPEND_DATA | FILE_WRITE_DATA;
+        _dbglog("access=%ls, disposition=%ls\n", L"FILE_READ_DATA | FILE_APPEND_DATA", L"CREATE_ALWAYS");
         return TRUE;
     }
     else {
@@ -1051,7 +1086,7 @@ static BOOL GetFileCreationFlags(const wchar_t* pwszmode, DWORD* disposition, DW
     }
 }
 
-static int PyEmbeddings_init(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds)
+static int PyEmbeddings_Init(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds)
 {
     _dbglog("PyEmbeddings_init();\n");
 
@@ -1105,7 +1140,7 @@ static int PyEmbeddings_init(PyEmbeddingsObject* self, PyObject* args, PyObject*
         dim,
         pwszmode ? pwszmode : L"(null)");
 
-    if (!File_open(&self->db, pwszpath, access, disposition, dim * sizeof(float))) {
+    if (!(self->db = fileopen(pwszpath, access, disposition, dim * sizeof(float)))) {
         PyErr_SetString(PyExc_OSError, "Embeddings_open() failed");
         goto error;
     }
@@ -1121,14 +1156,15 @@ error:
 }
 
 
-static void PyEmbeddings_dealloc(PyEmbeddingsObject* self)
+static void PyEmbeddings_Dealloc(PyEmbeddingsObject* self)
 {
-    _dbglog("PyEmbeddings_dealloc();\n");
-    File_close(&self->db);
+    _dbglog("PyEmbeddings_Dealloc();\n");
+    fileclose(self->db);
+    self->db = NULL;
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static PyObject* PyEmbeddings_append(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds)
+static PyObject* PyEmbeddings_Append(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds)
 {
     // _dbglog("PyEmbeddings_append()\n");
     PyObject* id = NULL;
@@ -1172,7 +1208,7 @@ static PyObject* PyEmbeddings_append(PyEmbeddingsObject* self, PyObject* args, P
     }
     /* Append to database */
     BOOL bFlush = FALSE;
-    if (!File_append(&self->db, u, blob.buf, (DWORD)blob.len, bFlush)) {
+    if (!fileappend(self->db, u, blob.buf, (DWORD)blob.len, bFlush)) {
         PyErr_SetString(PyExc_OSError, "EmbeddingsAppend failed");
         goto error;
     }
@@ -1183,22 +1219,24 @@ error:
     return NULL;
 }
 
-static PyObject* PyEmbeddings_search(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds)
+static PyObject* PyEmbeddings_Search(PyEmbeddingsObject* self, PyObject* args, PyObject* kwds)
 {
     _dbglog("PyEmbeddings_search();\n");
-    static char* kwlist[] = { "query", "len", "topk", "threshold", NULL };
+    static char* kwlist[] = { "query", "len", "topk", "threshold", "norm", NULL };
     Py_buffer buf;
     PyObject* len_obj = NULL;
     DWORD len = 0, topk = 0;
     float threshold = 0.0f;
+    /* 0 = use as-is, 1 = L2-normalize */
+    int norm = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "y*|OIf:search", kwlist,
-        &buf, &len_obj, &topk, &threshold)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "y*|OIfp:search", kwlist,
+        &buf, &len_obj, &topk, &threshold, &norm)) {
         return NULL;
     }
 
     /* Validate DB handle */
-    if (!self->db.hWrite || self->db.hWrite == INVALID_HANDLE_VALUE) {
+    if (!self->db->hWrite || self->db->hWrite == INVALID_HANDLE_VALUE) {
         PyBuffer_Release(&buf);
         PyErr_SetString(PyExc_RuntimeError, "Database is closed or invalid.");
         return NULL;
@@ -1222,6 +1260,11 @@ static PyObject* PyEmbeddings_search(PyEmbeddingsObject* self, PyObject* args, P
             return NULL;
         }
         len = (DWORD)(buf.len / sizeof(float));
+        if (buf.len != (Py_ssize_t)(len * sizeof(float))) {
+            PyBuffer_Release(&buf);
+            PyErr_Format(PyExc_ValueError, "Buffer size (%zd) does not match provided len (%u * %zu = %u).", buf.len, len, sizeof(float), len * (unsigned)sizeof(float));
+            return NULL;
+        }
     }
 
     if (topk == 0) {
@@ -1230,12 +1273,12 @@ static PyObject* PyEmbeddings_search(PyEmbeddingsObject* self, PyObject* args, P
         return NULL;
     }
 
-    if (self->db.header.blobSize != len * sizeof(float)) {
+    if (self->db->header.blobSize != len * sizeof(float)) {
         PyBuffer_Release(&buf);
         PyErr_Format(PyExc_ValueError,
             "Query size (%u bytes) does not match database blob size (%u bytes).",
             len * (unsigned)sizeof(float),
-            self->db.header.blobSize);
+            self->db->header.blobSize);
         return NULL;
     }
 
@@ -1246,18 +1289,19 @@ static PyObject* PyEmbeddings_search(PyEmbeddingsObject* self, PyObject* args, P
         return NULL;
     }
 
-    int32_t count = File_search(&self->db,
+    int32_t count = cosinesearch(self->db,
         (const float*)buf.buf,
         len,
         topk,
         scores,
-        threshold);
+        threshold,
+        norm);
 
     PyBuffer_Release(&buf);
 
     if (count < 0) {
         free(scores);
-        PyErr_SetString(PyExc_RuntimeError, "File_search failed.");
+        PyErr_SetString(PyExc_RuntimeError, "filesearch failed.");
         return NULL;
     }
 

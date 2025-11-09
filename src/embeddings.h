@@ -50,14 +50,16 @@ extern "C" {
         FileHeader header;
         SYSTEM_INFO os;
         wchar_t wszPath[PATH];
+        DWORD access;
+        DWORD dwCreationDisposition;
     } Embeddings;
 #pragma pack(pop)
 
-    EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_open(Embeddings* db, const wchar_t* szPath, DWORD access, DWORD dwCreationDisposition, uint32_t dwBlobSize);
-    EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_append(Embeddings* db, uiid id, const void* blob, DWORD blobSize, BOOL bFlush);
-    EMBEDDINGS_API BOOL EMBEDDINGS_CALL File_flush(Embeddings* db);
-    EMBEDDINGS_API void EMBEDDINGS_CALL File_close(Embeddings* db);
-    EMBEDDINGS_API uint32_t EMBEDDINGS_CALL File_version(Embeddings* db);
+    EMBEDDINGS_API Embeddings* EMBEDDINGS_CALL fileopen(const wchar_t* szPath, DWORD access, DWORD dwCreationDisposition, uint32_t dwBlobSize);
+    EMBEDDINGS_API BOOL EMBEDDINGS_CALL fileappend(Embeddings* db, uiid id, const void* blob, DWORD blobSize, BOOL bFlush);
+    EMBEDDINGS_API BOOL EMBEDDINGS_CALL fileflush(Embeddings* db);
+    EMBEDDINGS_API void EMBEDDINGS_CALL fileclose(Embeddings* db);
+    EMBEDDINGS_API uint32_t EMBEDDINGS_CALL fileversion(Embeddings* db);
 
 #pragma pack(push, 1)
     typedef struct {
@@ -66,12 +68,13 @@ extern "C" {
     } Score;
 #pragma pack(pop)
 
-    EMBEDDINGS_API int32_t EMBEDDINGS_CALL File_search(
+    EMBEDDINGS_API int32_t EMBEDDINGS_CALL cosinesearch(
         Embeddings* db,
         const float* query, uint32_t len,
         uint32_t topk,
         Score* scores,
-        float min);
+        float min,
+        BOOL bNorm);
 
 #pragma pack(push, 1)
     typedef struct Cursor {
@@ -86,11 +89,11 @@ extern "C" {
     } Cursor;
 #pragma pack(pop)
 
-    EMBEDDINGS_API Cursor* EMBEDDINGS_CALL Cursor_open(Embeddings* db, BOOL bReadOnly);
-    EMBEDDINGS_API void EMBEDDINGS_CALL Cursor_close(Cursor* cur);
-    EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_reset(Cursor* cur);
-    EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_read(Cursor* cur, DWORD* err);
-    EMBEDDINGS_API BOOL EMBEDDINGS_CALL Cursor_update(Cursor* cur, uiid id, const void* blob, DWORD blobSize, BOOL bFlush);
+    EMBEDDINGS_API Cursor* EMBEDDINGS_CALL cursoropen(Embeddings* db, BOOL bReadOnly);
+    EMBEDDINGS_API void EMBEDDINGS_CALL cursorclose(Cursor* cur);
+    EMBEDDINGS_API BOOL EMBEDDINGS_CALL cursorreset(Cursor* cur);
+    EMBEDDINGS_API BOOL EMBEDDINGS_CALL cursorread(Cursor* cur, DWORD* err);
+    EMBEDDINGS_API BOOL EMBEDDINGS_CALL cursorupdate(Cursor* cur, uiid id, const void* blob, DWORD blobSize, BOOL bFlush);
 
 #ifdef __cplusplus
 }

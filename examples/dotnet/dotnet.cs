@@ -1,6 +1,7 @@
 ﻿using embeddings;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -12,26 +13,22 @@ namespace dotnet {
 
             Console.WriteLine(Intel.mkl.Version.ToString());
 
-            IntPtr db = Embeddings.AllocDb();
+            var g = Guid.NewGuid();
+            Uiid u = Uiid.FromGuid(g);
+            Debug.Assert(u.ToGuid() == g);
 
-            // OPEN (like mode "a+"): GENERIC_READ | FILE_APPEND_DATA, OPEN_ALWAYS
-            const uint GENERIC_READ = 0x80000000;
-            const uint FILE_APPEND_DATA = 0x00000004;
-            const uint OPEN_ALWAYS = 4;
-
-            bool ok = Embeddings.Open(
-                db,
-                "test.db",
-                GENERIC_READ | FILE_APPEND_DATA,
-                OPEN_ALWAYS,
-                dim: 128 /* floats per vector */
+            IntPtr db = Embeddings.Open(
+                ":temp:",
+                "a++",
+                dim: 128
             );
-            if (!ok) throw new Exception("Open failed");
+
+            if (db == IntPtr.Zero) throw new Exception("Open failed");
 
             // APPEND
             float[] vec = new float[128];
             vec[0] = 1.0f;
-            Uiid id = Embeddings.GuidToUiid(Guid.NewGuid());
+            Uiid id = Uiid.FromGuid(Guid.NewGuid());
             fixed (float* pVec = vec) {
                 bool appended = Embeddings.Append(
                     db,
@@ -57,27 +54,26 @@ namespace dotnet {
 
                 Console.WriteLine("count = " + count);
                 for (int i = 0; i < count; i++) {
-                    Guid gid = Embeddings.UiidToGuid(ref scores[i].id);
+                    Guid gid = scores[i].id.ToGuid();
                     Console.WriteLine("{0}  {1}", gid, scores[i].score);
                 }
             }
 
-            // CURSOR scan (no extra copies per row)
-            IntPtr cur = Embeddings.CursorOpen(db);
-            uint err;
-            embeddings.RecordView rec;
-            while (Embeddings.CursorRead(cur, out rec, out err)) {
-                Guid gid = rec.ToGuid();
-                Console.WriteLine("Row guid = {0}, firstByteOfBlob = {1}",
-                    gid,
-                    rec.Blob[0]);
-            }
-            // err == ERROR_HANDLE_EOF when done.
-            Embeddings.CursorClose(cur);
+            // // CURSOR scan (no extra copies per row)
+            // IntPtr cur = Embeddings.CursorOpen(db);
+            // uint err;
+            // embeddings.RecordView rec;
+            // while (Embeddings.CursorRead(cur, out rec, out err)) {
+            //     Guid gid = rec.ToGuid();
+            //     Console.WriteLine("Row guid = {0}, firstByteOfBlob = {1}",
+            //         gid,
+            //         rec.Blob[0]);
+            // }
+            // // err == ERROR_HANDLE_EOF when done.
+            // Embeddings.CursorClose(cur);
 
             // CLEANUP
             Embeddings.Close(db);
-            Embeddings.FreeDb(db);
         }
     }
 

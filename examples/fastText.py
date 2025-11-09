@@ -1,4 +1,3 @@
-# pip install fasttext-wheel
 # https://fasttext.cc/docs/en/english-vectors.html
 
 import io, numpy

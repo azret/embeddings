@@ -13,3 +13,7 @@ embeddings.egg-info/
 /examples/dotnet/obj/Debug
 /examples/dotnet/obj/Release
 /examples/dotnet/bin/Release
+/examples/300d-1M-subword.300
+/examples/300d-1M-subword.vec
+/examples/wiki-news-300d-1M-subword.vec.zip
+/build/lib/embeddings
