@@ -49,10 +49,11 @@ static inline uint32_t powoftwo(uint32_t x)
     return x;
 }
 
-EMBEDDINGS_API Embeddings* EMBEDDINGS_CALL fileopen(const wchar_t* pwszpath, DWORD access, DWORD dwCreationDisposition, uint32_t dwBlobSize)
+EMBEDDINGS_API Embeddings* EMBEDDINGS_CALL fileopen(
+    const wchar_t* pwszpath, DWORD dwAccess, DWORD dwCreationDisposition, uint32_t dwBlobSize)
 {
 	Embeddings* db = malloc(sizeof(Embeddings));
-    _dbglog(">> fileopen(path='%ls' blob=%u access=0x%08X, disposition=0x%08X);\n", pwszpath, dwBlobSize, access, dwCreationDisposition);
+    _dbglog(">> fileopen(path='%ls' blob=%u access=0x%08X, disposition=0x%08X);\n", pwszpath, dwBlobSize, dwAccess, dwCreationDisposition);
     memset(db, 0, sizeof(*db));
     DWORD flags;
     assert(PATH >= MAX_PATH);
@@ -66,7 +67,7 @@ EMBEDDINGS_API Embeddings* EMBEDDINGS_CALL fileopen(const wchar_t* pwszpath, DWO
         }
         flags = FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_SEQUENTIAL_SCAN;
 		dwCreationDisposition = CREATE_ALWAYS;
-        access = FILE_READ_DATA | FILE_APPEND_DATA | FILE_WRITE_DATA;
+        dwAccess = FILE_READ_DATA | FILE_APPEND_DATA | FILE_WRITE_DATA;
 		pwszpath = db->wszPath;
     } else {
         if (!GetFullPathNameW(pwszpath, PATH, db->wszPath, NULL)) {
@@ -80,14 +81,14 @@ EMBEDDINGS_API Embeddings* EMBEDDINGS_CALL fileopen(const wchar_t* pwszpath, DWO
     _dbglog("path='%ls' blob=%u access=0x%08X, disposition=0x%08X\n",
         pwszpath,
         dwBlobSize,
-        access,
+        dwAccess,
         dwCreationDisposition);
     GetSystemInfo(&db->os);
     db->os.dwPageSize = db->os.dwPageSize ? db->os.dwPageSize : 4096;
     db->os.dwAllocationGranularity = db->os.dwAllocationGranularity ? db->os.dwAllocationGranularity : 65536;
 	if (dwBlobSize > MAXBLOB) {
         free(db);
-        fprintf(stderr, "Maximum blob Size is %lu.\n", MAXBLOB);
+        fprintf(stderr, "The specified blob size %lu is invalid. Maximum blob size is %lu.\n", dwBlobSize, MAXBLOB);
         return NULL;
     }
     if (dwBlobSize > 0) {
@@ -124,10 +125,10 @@ EMBEDDINGS_API Embeddings* EMBEDDINGS_CALL fileopen(const wchar_t* pwszpath, DWO
         fprintf(stderr, "Invalid header size.\n");
         return NULL;
     }
-	db->access = access;
+	db->access = dwAccess;
 	db->dwCreationDisposition = dwCreationDisposition;
     db->hWrite = CreateFileW(pwszpath,
-        access,
+        dwAccess,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL,
         dwCreationDisposition,
@@ -392,7 +393,41 @@ static inline float _normf(const float* a, DWORD n) {
 
 const float EPSILON = 1e-6f;
 
-EMBEDDINGS_API int32_t EMBEDDINGS_CALL cosinesearch(
+void cosine(const float* query, uint32_t len, 
+    float qnorm,
+    uint8_t* buff, float min,
+    size_t* num,
+    uint32_t topk,
+    Score* heap,
+    BOOL bNorm)
+{
+    const uiid* id = (const uiid*)buff;
+    const float* blob = (const float*)(buff + sizeof(uiid));
+    float norm = bNorm
+        ? _normf(blob, len)
+        : 1;
+    if (norm > EPSILON) {
+        double dot = _dotf(blob, query, len);
+        float score = (float)(dot / ((double)qnorm * (double)norm));
+        if (score >= min) {
+            if (*num < topk) {
+                // start accumulating until we fill the heap
+                _uiidcpy(&heap[*num].id, id);
+                heap[*num].score = score;
+                (*num) = (*num) + 1;
+                qsort(heap, *num, sizeof(Score), _score);
+            }
+            else if (score > heap[topk - 1].score) {
+                // evict the lowest score
+                _uiidcpy(&heap[topk - 1].id, id);
+                heap[topk - 1].score = score;
+                qsort(heap, *num, sizeof(Score), _score);
+            }
+        }
+    }
+}
+
+EMBEDDINGS_API int32_t EMBEDDINGS_CALL filesearch(
     Embeddings* db,
     const float* query, uint32_t len,
     uint32_t topk,
@@ -409,9 +444,17 @@ EMBEDDINGS_API int32_t EMBEDDINGS_CALL cosinesearch(
         fprintf(stderr, "The specified query pointer is NULL.\n");
         return -1;
     }
+    float qnorm = bNorm
+        ? _normf(query, len)
+        : 1;
+    _dbglog("qnorm = %f;\n", qnorm);
+    if (qnorm < EPSILON) {
+        fprintf(stderr, "Query vector norm too small (%.8g).\n", qnorm);
+        return -1;
+    }
     if (len == 0) {
         fprintf(stderr, "The specified query length is zero.\n");
-        return FALSE;
+        return -1;
     }
     if (!db->hWrite || db->hWrite == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "The specified database is closed or invalid.\n");
@@ -439,92 +482,82 @@ EMBEDDINGS_API int32_t EMBEDDINGS_CALL cosinesearch(
         fprintf(stderr, "Failed to duplicate file handle for search (system error %lu).\n", GetLastError());
         return -1;
     }
-    size_t cc = __alignup(sizeof(uiid) + db->header.blobSize, db->header.alignment);
-    uint8_t* buff = (uint8_t*)_aligned_malloc(cc, db->header.alignment);
-    if (!buff) {
-        fprintf(stderr, "Memory allocation failed while preparing the read buffer.\n");
-        CloseHandle(hRead);
-        return -1;
-    }
     LARGE_INTEGER offset = { MAXHEAD };
     if (!SetFilePointerEx(hRead, offset, NULL, FILE_BEGIN)) {
         fprintf(stderr, "Failed to seek to the first record (system error %lu).\n", GetLastError());
-        _aligned_free(buff);
         CloseHandle(hRead);
         return -1;
     }
     Score* heap = (Score*)calloc(topk, sizeof(Score));
     if (!heap) {
         fprintf(stderr, "Memory allocation failed while preparing the top-k heap.\n");
-        _aligned_free(buff);
         CloseHandle(hRead);
         return -1;
     }
-    float qnorm = bNorm
-        ? _normf(query, len)
-        : 1;
-    _dbglog("qnorm = %f;\n", qnorm);
-    if (qnorm < EPSILON) {
-        fprintf(stderr, "Query vector norm too small (%.8g).\n", qnorm);
+    uint32_t stride = __alignup(sizeof(uiid) + db->header.blobSize, db->header.alignment);
+    uint8_t* carry = (uint8_t*)malloc(stride);
+    if (!carry) {
+        fprintf(stderr, "Memory allocation failed while preparing the read buffers.\n");
         free(heap);
-        _aligned_free(buff);
         CloseHandle(hRead);
         return -1;
     }
-    DWORD count = 0;
-    for (;;) {
-        DWORD bytesRead = 0;
-        BOOL ok = ReadFile(hRead, buff, (DWORD)cc, &bytesRead, NULL);
-        if (!ok) {
-            // _dbglog("EOF\n");
-            break;
-        }
-        if (bytesRead < cc) {
-            // _dbglog("partial read expected: %lu, read: %lu\n", (unsigned long)cc, (unsigned long)bytesRead);
-            break;
-		}
-        const uiid* id = (const uiid*)buff;
-        const float* blob = (const float*)(buff + sizeof(uiid));
-        float norm = bNorm
-            ? _normf(blob, len)
-            : 1;
-        // _dbglog("norm = %f;\n", norm);
-        if (norm < EPSILON)
-            continue;
-        double dot = _dotf(blob, query, len);
-        // _dbglog("dot = %f;\n", dot);
-        float score = (float)(dot / ((double)qnorm * (double)norm));
-        // _dbglog("score = %f;\n", score);
-        if (score < min) {
-            continue; /* prune below threshold */
-        }
-        if (count < topk) {
-            _uiidcpy(&heap[count].id, id);
-            heap[count].score = score;
-            ++count;
-            if (count == topk) {
-                qsort(heap, count, sizeof(Score), _score);
-            }
-        }
-        else if (score > heap[topk - 1].score) {
-            _uiidcpy(&heap[topk - 1].id, id);
-            heap[topk - 1].score = score;
-            qsort(heap, count, sizeof(Score), _score);
-        }
+    const uint32_t MAX = 1024;
+    uint8_t* big = (uint8_t*)_aligned_malloc((size_t)(MAX * stride), db->header.alignment);
+    if (!big) {
+        fprintf(stderr, "Memory allocation failed while preparing the read buffers.\n");
+        free(heap);
+        free(carry);
+        CloseHandle(hRead);
+        return -1;
     }
-    assert(count <= topk);
-    /* Return in descending order */
+    size_t num = 0; size_t leftoverBytes = 0;
+    for (;;) {
+        if (leftoverBytes) {
+            memcpy(big, carry, leftoverBytes);
+        }
+        DWORD bytesRead = 0;
+        BOOL ok = ReadFile(hRead, big + leftoverBytes, (DWORD)(MAX * stride - leftoverBytes), &bytesRead, NULL);
+        if (!ok || bytesRead == 0) {
+            break; // EOF
+        }
+        size_t total = leftoverBytes + bytesRead;
+        size_t offset = 0;
+        while (offset + stride <= total) {
+            cosine(
+                query,
+                len,
+                qnorm,
+                (uint8_t*)big + offset,
+                min,
+                &num,
+                topk,
+                heap,
+                bNorm);
+            offset += stride;
+        } 
+        leftoverBytes = total - offset;
+        if (leftoverBytes) {
+            memcpy(carry, big + offset, leftoverBytes);
+        }
+
+    }
+    assert(num <= topk);
 	memset(scores, 0, topk * sizeof(Score));
-    for (DWORD i = 0; i < count; ++i) {
+    for (DWORD i = 0; i < num; ++i) {
         _uiidcpy(&scores[i].id, &heap[i].id);
 		scores[i].score = heap[i].score;
     }
+    _aligned_free(big);
+    free(carry);
     free(heap);
-    _aligned_free(buff);
     CloseHandle(hRead);
-    _dbglog("filesearch() = %d;\n", count);
-    return count;
+    _dbglog("filesearch() = %u;\n", (unsigned int)num);
+    return num;
 }
+
+
+/* Cursor API is desined for offline processing. It should not be used on a live index for upserting. */
 
 EMBEDDINGS_API void EMBEDDINGS_CALL cursorclose(Cursor* cur)
 {
@@ -1227,9 +1260,7 @@ static PyObject* PyEmbeddings_Search(PyEmbeddingsObject* self, PyObject* args, P
     PyObject* len_obj = NULL;
     DWORD len = 0, topk = 0;
     float threshold = 0.0f;
-    /* 0 = use as-is, 1 = L2-normalize */
-    int norm = 0;
-
+	int norm = 1; // Normalize by default
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "y*|OIfp:search", kwlist,
         &buf, &len_obj, &topk, &threshold, &norm)) {
         return NULL;
@@ -1289,7 +1320,7 @@ static PyObject* PyEmbeddings_Search(PyEmbeddingsObject* self, PyObject* args, P
         return NULL;
     }
 
-    int32_t count = cosinesearch(self->db,
+    int32_t count = filesearch(self->db,
         (const float*)buf.buf,
         len,
         topk,

@@ -25,6 +25,12 @@
 extern "C" {
 #endif
 
+typedef enum DTYPE {
+    DTYPE_FLOAT32 = 0, /* 4 bytes per component */
+    DTYPE_FLOAT16 = 1, /* 2 bytes per component (IEEE 754 half) */
+    DTYPE_INT8 = 2 /* per-vector: [float scale][dim x int8_t] */
+} DTYPE;
+
 #pragma pack(push, 1)
     typedef struct uiid {
         unsigned char bytes[16];
@@ -42,7 +48,7 @@ extern "C" {
     } FileHeader;
 #pragma pack(pop)
 
-    #define PATH 1024
+#define PATH 1024
 
 #pragma pack(push, 1)
     typedef struct Embeddings {
@@ -55,8 +61,12 @@ extern "C" {
     } Embeddings;
 #pragma pack(pop)
 
-    EMBEDDINGS_API Embeddings* EMBEDDINGS_CALL fileopen(const wchar_t* szPath, DWORD access, DWORD dwCreationDisposition, uint32_t dwBlobSize);
-    EMBEDDINGS_API BOOL EMBEDDINGS_CALL fileappend(Embeddings* db, uiid id, const void* blob, DWORD blobSize, BOOL bFlush);
+    EMBEDDINGS_API Embeddings* EMBEDDINGS_CALL fileopen(
+        const wchar_t* szPath, DWORD dwAccess, DWORD dwCreationDisposition,
+        uint32_t dwBlobSize);
+    EMBEDDINGS_API BOOL EMBEDDINGS_CALL fileappend(
+        Embeddings* db, uiid id,
+        const void* blob, DWORD blobSize, BOOL bFlush);
     EMBEDDINGS_API BOOL EMBEDDINGS_CALL fileflush(Embeddings* db);
     EMBEDDINGS_API void EMBEDDINGS_CALL fileclose(Embeddings* db);
     EMBEDDINGS_API uint32_t EMBEDDINGS_CALL fileversion(Embeddings* db);
@@ -68,13 +78,15 @@ extern "C" {
     } Score;
 #pragma pack(pop)
 
-    EMBEDDINGS_API int32_t EMBEDDINGS_CALL cosinesearch(
+    EMBEDDINGS_API int32_t EMBEDDINGS_CALL filesearch(
         Embeddings* db,
         const float* query, uint32_t len,
         uint32_t topk,
         Score* scores,
         float min,
         BOOL bNorm);
+
+    void cosine(const float* query, uint32_t len, float qnorm, uint8_t* buff, float min, size_t* pnum, uint32_t topk, Score* heap, BOOL bNorm);
 
 #pragma pack(push, 1)
     typedef struct Cursor {
@@ -88,6 +100,8 @@ extern "C" {
         uint32_t blobSize;
     } Cursor;
 #pragma pack(pop)
+
+    /* Cursor API is desined for offline processing. It should not be used on a live index for upserting. */
 
     EMBEDDINGS_API Cursor* EMBEDDINGS_CALL cursoropen(Embeddings* db, BOOL bReadOnly);
     EMBEDDINGS_API void EMBEDDINGS_CALL cursorclose(Cursor* cur);

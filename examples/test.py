@@ -60,7 +60,7 @@ print()
 
 print(numpy.frombuffer(query[1], dtype=numpy.float32))
 
-results = db.search(query[1], topk=topk)
+results = db.search(query[1], topk=topk, norm=True)
 
 for id, score in results:
     print("id:", id, "score:", score)
