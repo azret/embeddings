@@ -416,6 +416,14 @@ static void remove_from_heap(Score* heap, size_t* num, size_t idx)
     (*num)--;
 }
 
+static void remove_from_heap_if(Score* heap, size_t* num, const uiid* id)
+{
+    int idx = find_in_heap(heap, *num, id);
+    if (idx >= 0) {
+        remove_from_heap(heap, num, (size_t)idx);
+    }
+}
+
 void cosine(const float* query, uint32_t len,
     float qnorm,
     const uint8_t* buff,
@@ -430,27 +438,29 @@ void cosine(const float* query, uint32_t len,
     float norm = bNorm
         ? cblas_snrm2(blob, len)
         : 1;
-    if (norm > EPSILON) {
-        int existing = find_in_heap(heap, *num, id);
-        if (existing >= 0) {
-            remove_from_heap(heap, num, (size_t)existing);
+    if (norm < EPSILON) {
+        return;
+    }
+    remove_from_heap_if(
+        heap,
+        num,
+        id
+    );
+    double dot = cblas_sdot(blob, query, len);
+    float score = (float)(dot / ((double)qnorm * (double)norm));
+    if (score >= min) {
+        if (*num < topk) {
+            // start accumulating until we fill the heap
+            _uiidcpy(&heap[*num].id, id);
+            heap[*num].score = score;
+            (*num) = (*num) + 1;
+            qsort(heap, *num, sizeof(Score), heap_qsort_func);
         }
-        double dot = cblas_sdot(blob, query, len);
-        float score = (float)(dot / ((double)qnorm * (double)norm));
-        if (score >= min) {
-            if (*num < topk) {
-                // start accumulating until we fill the heap
-                _uiidcpy(&heap[*num].id, id);
-                heap[*num].score = score;
-                (*num) = (*num) + 1;
-                qsort(heap, *num, sizeof(Score), heap_qsort_func);
-            }
-            else if (score > heap[topk - 1].score) {
-                // evict the lowest score
-                _uiidcpy(&heap[topk - 1].id, id);
-                heap[topk - 1].score = score;
-                qsort(heap, *num, sizeof(Score), heap_qsort_func);
-            }
+        else if (score > heap[topk - 1].score) {
+            // evict the lowest score
+            _uiidcpy(&heap[topk - 1].id, id);
+            heap[topk - 1].score = score;
+            qsort(heap, *num, sizeof(Score), heap_qsort_func);
         }
     }
 }
@@ -582,7 +592,6 @@ EMBEDDINGS_API int32_t EMBEDDINGS_CALL filesearch(
     _dbglog("filesearch() = %u;\n", (unsigned int)num);
     return num;
 }
-
 
 /* Cursor API is desined for offline processing. It should not be used on a live index for upserting. */
 

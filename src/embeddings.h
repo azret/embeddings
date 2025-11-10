@@ -86,6 +86,8 @@ typedef enum DTYPE {
         float min,
         BOOL bNorm);
 
+    void remove_from_heap_if(Score* heap, size_t* num, const uiid* id);
+
     void cosine(const float* query, uint32_t len, float qnorm, uint8_t* buff, float min, size_t* pnum, uint32_t topk, Score* heap, BOOL bNorm);
 
 #pragma pack(push, 1)
