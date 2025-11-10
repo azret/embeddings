@@ -307,6 +307,7 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL fileappend(Embeddings* db, uiid id, const vo
             db->header.blobSize);
         return FALSE;
     }
+    // TODO : OP (0: Add, 1, Delete, 2 Update)
 	size_t cc = __alignup(sizeof(uiid) + db->header.blobSize, db->header.alignment);
     uint8_t* buff = (uint8_t*)_aligned_malloc(cc, db->header.alignment);
     if (!buff) {
@@ -375,27 +376,50 @@ EMBEDDINGS_API BOOL EMBEDDINGS_CALL fileflush(Embeddings* db) {
     return TRUE;
 }
 
-static int __cdecl _score(const Score* a, const Score* b) {
-    return (a->score < b->score) - (a->score > b->score);
-}
-
-static inline float _dotf(const float* a, const float* b, DWORD n) {
+static inline float cblas_sdot(const float* a, const float* b, uint32_t n) {
     double s = 0.0;
-    for (DWORD i = 0; i < n; ++i) s += (double)a[i] * (double)b[i];
+    for (uint32_t i = 0; i < n; ++i) s += (double)a[i] * (double)b[i];
     return (float)s;
 }
 
-static inline float _normf(const float* a, DWORD n) {
+static inline float cblas_snrm2(const float* a, uint32_t n) {
     double s = 0.0;
-    for (DWORD i = 0; i < n; ++i) s += (double)a[i] * (double)a[i];
+    for (uint32_t i = 0; i < n; ++i) s += (double)a[i] * (double)a[i];
     return (float)sqrt(s);
 }
 
 const float EPSILON = 1e-6f;
 
-void cosine(const float* query, uint32_t len, 
+static int __cdecl heap_qsort_func(const void* pa, const void* pb)
+{
+    const Score* a = (const Score*)pa;
+    const Score* b = (const Score*)pb;
+    return (a->score < b->score) - (a->score > b->score);
+}
+
+static int find_in_heap(const Score* heap, size_t num, const uiid* id)
+{
+    for (size_t i = 0; i < num; ++i) {
+        if (_uiidcmp(&heap[i].id, id)) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void remove_from_heap(Score* heap, size_t* num, size_t idx)
+{
+    if (idx >= *num) return;
+    for (size_t i = idx; i + 1 < *num; ++i) {
+        heap[i] = heap[i + 1];
+    }
+    (*num)--;
+}
+
+void cosine(const float* query, uint32_t len,
     float qnorm,
-    uint8_t* buff, float min,
+    const uint8_t* buff,
+    float min,
     size_t* num,
     uint32_t topk,
     Score* heap,
@@ -404,10 +428,14 @@ void cosine(const float* query, uint32_t len,
     const uiid* id = (const uiid*)buff;
     const float* blob = (const float*)(buff + sizeof(uiid));
     float norm = bNorm
-        ? _normf(blob, len)
+        ? cblas_snrm2(blob, len)
         : 1;
     if (norm > EPSILON) {
-        double dot = _dotf(blob, query, len);
+        int existing = find_in_heap(heap, *num, id);
+        if (existing >= 0) {
+            remove_from_heap(heap, num, (size_t)existing);
+        }
+        double dot = cblas_sdot(blob, query, len);
         float score = (float)(dot / ((double)qnorm * (double)norm));
         if (score >= min) {
             if (*num < topk) {
@@ -415,13 +443,13 @@ void cosine(const float* query, uint32_t len,
                 _uiidcpy(&heap[*num].id, id);
                 heap[*num].score = score;
                 (*num) = (*num) + 1;
-                qsort(heap, *num, sizeof(Score), _score);
+                qsort(heap, *num, sizeof(Score), heap_qsort_func);
             }
             else if (score > heap[topk - 1].score) {
                 // evict the lowest score
                 _uiidcpy(&heap[topk - 1].id, id);
                 heap[topk - 1].score = score;
-                qsort(heap, *num, sizeof(Score), _score);
+                qsort(heap, *num, sizeof(Score), heap_qsort_func);
             }
         }
     }
@@ -445,7 +473,7 @@ EMBEDDINGS_API int32_t EMBEDDINGS_CALL filesearch(
         return -1;
     }
     float qnorm = bNorm
-        ? _normf(query, len)
+        ? cblas_snrm2(query, len)
         : 1;
     _dbglog("qnorm = %f;\n", qnorm);
     if (qnorm < EPSILON) {
@@ -540,7 +568,6 @@ EMBEDDINGS_API int32_t EMBEDDINGS_CALL filesearch(
         if (leftoverBytes) {
             memcpy(carry, big + offset, leftoverBytes);
         }
-
     }
     assert(num <= topk);
 	memset(scores, 0, topk * sizeof(Score));

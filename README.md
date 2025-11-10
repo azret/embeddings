@@ -3,13 +3,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Build](https://github.com/azret/embeddings/actions/workflows/ci.yml/badge.svg)](https://github.com/azret/embeddings/actions)
 
-A tiny binary store for fixed length **F32** embeddings.
+A tiny append-only vector store for fixed length **F32** embeddings.
 
 ### File Format
 
 The file consists of a header followed by a sequence of records. Each record is composed of a unique identifier (UUID - 16 bytes) and a binary blob.
 
-**| HEADER : UIID : BLOB : UUID : BLOB : ... |** 
+**|HEADER|UIID|BLOB|UUID|BLOB|...** 
 
 ### Implementation Details
 
